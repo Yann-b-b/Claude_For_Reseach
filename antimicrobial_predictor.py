@@ -375,12 +375,27 @@ def plot_training_history(train_losses: List[float], val_losses: List[float]):
     plt.grid(True)
     plt.show()
 
-if __name__ == "__main__":
-    # Generate sample data
-    print("Generating sample data...")
-    dna_sequences, protein_sequences, labels = generate_sample_data(1000)
+def load_real_dataset():
+    """Load the real antimicrobial dataset"""
+    import pandas as pd
+    import os
 
-    print(f"Generated {len(labels)} samples")
+    # Check if processed dataset exists
+    if os.path.exists('antimicrobial_training_data.csv'):
+        print("Loading processed dataset...")
+        df = pd.read_csv('antimicrobial_training_data.csv')
+        return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
+    else:
+        print("Processed dataset not found. Please run prepare_dataset.py first.")
+        print("Falling back to synthetic data...")
+        return generate_sample_data(1000)
+
+if __name__ == "__main__":
+    # Load real dataset or fall back to synthetic data
+    print("Loading dataset...")
+    dna_sequences, protein_sequences, labels = load_real_dataset()
+
+    print(f"Loaded {len(labels)} samples")
     print(f"Positive samples: {sum(labels)} ({sum(labels)/len(labels)*100:.1f}%)")
 
     # Initialize model and trainer
