@@ -380,13 +380,17 @@ def load_real_dataset():
     import pandas as pd
     import os
 
-    # Check if processed dataset exists
-    if os.path.exists('antimicrobial_training_data.csv'):
+    # Check if combined processed dataset exists
+    if os.path.exists('combined_amp_training_data.csv'):
+        print("Loading combined processed dataset...")
+        df = pd.read_csv('combined_amp_training_data.csv')
+        return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
+    elif os.path.exists('antimicrobial_training_data.csv'):
         print("Loading processed dataset...")
         df = pd.read_csv('antimicrobial_training_data.csv')
         return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
     else:
-        print("Processed dataset not found. Please run prepare_dataset.py first.")
+        print("Processed dataset not found. Please run combine_amp_datasets.py first.")
         print("Falling back to synthetic data...")
         return generate_sample_data(1000)
 
@@ -408,7 +412,7 @@ if __name__ == "__main__":
 
     # Train model
     print("Training model...")
-    train_losses, val_losses = trainer.train(train_loader, val_loader, num_epochs=50)
+    train_losses, val_losses = trainer.train(train_loader, val_loader, num_epochs=10)
 
     # Evaluate model
     print("Evaluating model...")

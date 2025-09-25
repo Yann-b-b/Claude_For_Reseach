@@ -9,10 +9,18 @@ Predicts whether a peptide kills a bacterium from two inputs: bacterial DNA sequ
 - **Fusion + Classifier**: Concat(256+512=768) → MLP 768→512→256 (ReLU + dropout) → 256→128→64→1 → Sigmoid.
 
 #### Data
-- Uses a **synthetic dataset** (for pipeline demonstration only):
-  - Random DNA (≤1000 bp) and peptide sequences (≤200 aa).
-  - Labels from peptide cationic fraction (R/K/H) + Gaussian noise; thresholded to 0/1.
-  - Encoded with integer vocabularies and padding; stratified 80/20 split.
+- Default: processed GRAMPA-derived CSV `antimicrobial_training_data.csv`
+  - `protein_sequence`: peptide sequence from GRAMPA.
+  - `bacterium_species` → mapped to a representative reference genome (NCBI RefSeq accessions below); a 1,000 bp slice of that genome is used as `dna_sequence`.
+    - E. coli K-12 MG1655 — NC_000913.3
+    - Staphylococcus aureus NCTC 8325 — NC_007795.1
+    - Bacillus subtilis 168 — NC_000964.3
+    - Pseudomonas aeruginosa PAO1 — NC_002516.2
+    - Streptococcus pneumoniae TIGR4 — NC_003028.3
+  - Species name normalization maps common variants (e.g., “Escherichia coli”, “E. coli”, “ecoli”) to the above; unmapped names default to E. coli.
+  - `antimicrobial_activity`: binary label derived from GRAMPA activity values (simple thresholding).
+  - If the processed CSV is missing, run `prepare_dataset.py` (uses `grampa_dataset.csv` and downloads genomes; falls back to random DNA if needed).
+- Fallback: synthetic data generator is used only when `antimicrobial_training_data.csv` is not found.
 
 #### Training Pipeline
 - Optimizer: Adam (lr 1e-3, weight_decay 1e-5); Loss: **BCELoss**.
