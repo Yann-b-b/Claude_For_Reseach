@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
-from typing import Tuple, List, Dict, Optional
+from typing import List, Dict, Optional
 from tqdm import tqdm
 
 class SequenceEncoder:
@@ -24,7 +24,7 @@ class SequenceEncoder:
             'S': 16, 'T': 17, 'W': 18, 'Y': 19, 'V': 20, 'X': 0  # X for unknown
         }
 
-    def encode_dna(self, sequence: str, max_length: int = 1000) -> np.ndarray:
+    def encode_dna(self, sequence: str, max_length: int = 50) -> np.ndarray:
         """Encode DNA sequence to numerical array"""
         sequence = sequence.upper()
         encoded = [self.dna_vocab.get(base, 0) for base in sequence]
@@ -37,7 +37,7 @@ class SequenceEncoder:
 
         return np.array(encoded, dtype=np.int64)
 
-    def encode_protein(self, sequence: str, max_length: int = 200) -> np.ndarray:
+    def encode_protein(self, sequence: str, max_length: int = 100) -> np.ndarray:
         """Encode protein sequence to numerical array"""
         sequence = sequence.upper()
         encoded = [self.aa_vocab.get(aa, 0) for aa in sequence]
@@ -329,38 +329,7 @@ class AntimicrobialTrainer:
             'auc_score': auc
         }
 
-def generate_sample_data(n_samples: int = 1000) -> Tuple[List[str], List[str], List[int]]:
-    """Generate sample data for demonstration purposes"""
-
-    np.random.seed(42)
-
-    dna_bases = ['A', 'T', 'G', 'C']
-    amino_acids = list('ARNDCQEGHILKMFPSTWYV')
-
-    dna_sequences = []
-    protein_sequences = []
-    labels = []
-
-    for i in range(n_samples):
-        # Generate random DNA sequence (500-1000 bp)
-        dna_length = np.random.randint(500, 1001)
-        dna_seq = ''.join(np.random.choice(dna_bases, dna_length))
-
-        # Generate random protein sequence (50-200 aa)
-        protein_length = np.random.randint(50, 201)
-        protein_seq = ''.join(np.random.choice(amino_acids, protein_length))
-
-        # Generate label (simplified: based on protein length and composition)
-        # Longer peptides with more cationic residues are more likely to be antimicrobial
-        cationic_count = protein_seq.count('R') + protein_seq.count('K') + protein_seq.count('H')
-        antimicrobial_score = (cationic_count / protein_length) * 100 + np.random.normal(0, 10)
-        label = 1 if antimicrobial_score > 15 else 0
-
-        dna_sequences.append(dna_seq)
-        protein_sequences.append(protein_seq)
-        labels.append(label)
-
-    return dna_sequences, protein_sequences, labels
+ 
 
 def plot_training_history(train_losses: List[float], val_losses: List[float]):
     """Plot training history"""
@@ -389,10 +358,14 @@ def load_real_dataset():
         print("Loading processed dataset...")
         df = pd.read_csv('antimicrobial_training_data.csv')
         return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
+    # Fallback: look inside Dataset_and_train_sequence folder
     else:
-        print("Processed dataset not found. Please run combine_amp_datasets.py first.")
-        print("Falling back to synthetic data...")
-        return generate_sample_data(1000)
+        alt_path = os.path.join('Dataset_and_train_sequence', 'antimicrobial_training_data.csv')
+        if os.path.exists(alt_path):
+            print("Loading processed dataset from Dataset_and_train_sequence/...")
+            df = pd.read_csv(alt_path)
+            return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
+        raise SystemExit("No dataset found. Provide a CSV with columns dna_sequence, protein_sequence, antimicrobial_activity.")
 
 if __name__ == "__main__":
     # Load real dataset or fall back to synthetic data
