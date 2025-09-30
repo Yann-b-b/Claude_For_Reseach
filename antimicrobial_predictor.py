@@ -186,6 +186,9 @@ class AntimicrobialTrainer:
               weight_decay: float = 1e-5, early_stopping_patience: int = 10):
         """Train the model"""
 
+        import datetime
+        import os
+
         optimizer = torch.optim.Adam(self.model.parameters(),
                                    lr=learning_rate, weight_decay=weight_decay)
         criterion = nn.BCELoss()
@@ -195,6 +198,12 @@ class AntimicrobialTrainer:
         val_losses = []
         best_val_loss = float('inf')
         patience_counter = 0
+        best_val_acc = 0.0
+
+        # Prepare runs directory for checkpoints
+        run_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_dir = os.path.join('runs', f'run_{run_ts}')
+        os.makedirs(run_dir, exist_ok=True)
 
         for epoch in range(num_epochs):
             # Training phase
@@ -262,12 +271,31 @@ class AntimicrobialTrainer:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
-                torch.save(self.model.state_dict(), 'best_model.pth')
             else:
                 patience_counter += 1
                 if patience_counter >= early_stopping_patience:
                     print(f'Early stopping at epoch {epoch+1}')
                     break
+
+            # Save checkpoint for this epoch
+            ckpt_path = os.path.join(run_dir, f'epoch_{epoch+1:03d}_valacc_{val_acc:.4f}.pth')
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'val_acc': val_acc,
+                'val_auc': val_auc,
+            }, ckpt_path)
+
+            # Track best by validation accuracy and write versioned root artifact
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                # Versioned filename in repo root, plus overwrite canonical best_model.pth
+                versioned = f"best_model_val_acc{val_acc:.4f}.pth"
+                torch.save(self.model.state_dict(), versioned)
+                torch.save(self.model.state_dict(), 'best_model.pth')
 
         # Load best model
         self.model.load_state_dict(torch.load('best_model.pth'))
@@ -332,7 +360,10 @@ class AntimicrobialTrainer:
  
 
 def plot_training_history(train_losses: List[float], val_losses: List[float]):
-    """Plot training history"""
+    """Plot training history and save to plots/training_history.png"""
+
+    import os
+    os.makedirs('plots', exist_ok=True)
 
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
@@ -342,7 +373,9 @@ def plot_training_history(train_losses: List[float], val_losses: List[float]):
     plt.title('Training History')
     plt.legend()
     plt.grid(True)
-    plt.show()
+    plt.tight_layout()
+    plt.savefig('plots/training_history.png', dpi=200)
+    plt.close()
 
 def load_real_dataset():
     """Load the real antimicrobial dataset"""
@@ -385,7 +418,7 @@ if __name__ == "__main__":
 
     # Train model
     print("Training model...")
-    train_losses, val_losses = trainer.train(train_loader, val_loader, num_epochs=10)
+    train_losses, val_losses = trainer.train(train_loader, val_loader, num_epochs=20)
 
     # Evaluate model
     print("Evaluating model...")
