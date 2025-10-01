@@ -11,6 +11,7 @@ Run ablation experiment:
 """
 
 import os
+import sys
 import json
 import math
 import random
@@ -26,8 +27,23 @@ from sklearn.metrics import roc_curve, auc, precision_recall_curve, confusion_ma
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import shutil
+import glob
+import re
+import argparse
 
-from antimicrobial_predictor import AntimicrobialPredictor, AntimicrobialTrainer, load_real_dataset, SequenceEncoder
+# Ensure project root is importable when running from ablation_study/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from antimicrobial_predictor import (
+    AntimicrobialPredictor,
+    AntimicrobialTrainer,
+    AntimicrobialDataset,
+    load_real_dataset,
+    SequenceEncoder,
+)
 
 
 def split_70_15_15(dna: List[str], pep: List[str], y: List[int], seed: int):
@@ -134,35 +150,94 @@ def set_seed(seed: int):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
 
-def main(num_seeds: int = 5):
+def resolve_exp_dir(num_seeds: int, requested: str | None) -> Path:
+    if requested:
+        d = PROJECT_ROOT/Path(requested)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    # try latest matching directory
+    base = PROJECT_ROOT/Path("ablation_study/reports")
+    base.mkdir(parents=True, exist_ok=True)
+    pattern = f"grampa_split70-15-15_seed{num_seeds}_"
+    candidates = sorted([p for p in base.glob(f"{pattern}*") if p.is_dir()])
+    if candidates:
+        return candidates[-1]
+    # otherwise create new dated dir
+    today = datetime.datetime.now().strftime('%Y%m%d')
+    d = base/f"grampa_split70-15-15_seed{num_seeds}_{today}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--num_seeds", type=int, default=5)
+    ap.add_argument("--exp_dir", type=str, default="", help="Optional existing report dir under ablation_study/reports to resume")
+    args = ap.parse_args()
+
     dna, pep, y = load_real_dataset()
 
-    today = datetime.datetime.now().strftime('%Y%m%d')
-    exp_dir = Path(f"reports/grampa_split70-15-15_seed{num_seeds}_{today}")
+    exp_dir = resolve_exp_dir(args.num_seeds, args.exp_dir or None)
     fig_dir = exp_dir/"figures"
     tab_dir = exp_dir/"tables"
     fig_dir.mkdir(parents=True, exist_ok=True)
     tab_dir.mkdir(parents=True, exist_ok=True)
+    # Prepare ablation_study runs directory
+    ablation_runs_root = PROJECT_ROOT/Path("ablation_study/runs")
+    ablation_runs_root.mkdir(parents=True, exist_ok=True)
 
     accs = []
     aucs = []
 
     all_seed_metrics = []
 
-    for s in range(num_seeds):
-        seed = 42 + s
+    # Determine which seeds to run (skip completed ones)
+    seeds = [42 + s for s in range(args.num_seeds)]
+    to_run: List[int] = []
+    for seed in seeds:
+        metrics_file = tab_dir/f"metrics_seed_{seed}.json"
+        if metrics_file.exists():
+            continue
+        to_run.append(seed)
+
+    for seed in to_run:
         set_seed(seed)
         (dna_tr, pep_tr, y_tr), (dna_va, pep_va, y_va), (dna_te, pep_te, y_te) = split_70_15_15(dna, pep, y, seed)
 
-        # Build loaders from the split
+        # Build loaders for the predetermined splits (no re-splitting)
         model = AntimicrobialPredictor()
         trainer = AntimicrobialTrainer(model)
+        encoder = SequenceEncoder()
+        from torch.utils.data import DataLoader
 
-        # Compose loaders manually for train/val; and a test loader for evaluation
-        train_loader, val_loader = trainer.prepare_data(dna_tr + dna_va, pep_tr + pep_va, y_tr + y_va, test_size=len(y_va)/ (len(y_tr)+len(y_va)))
+        train_ds = AntimicrobialDataset(dna_tr, pep_tr, y_tr, encoder)
+        val_ds = AntimicrobialDataset(dna_va, pep_va, y_va, encoder)
+        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+        val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
-        # Train
-        train_losses, val_losses = trainer.train(train_loader, val_loader, num_epochs=20)
+        # Train in an isolated working directory to avoid writing .pth files to repo root
+        seed_runs_parent = ablation_runs_root/Path(exp_dir.name)/f"seed_{seed}"
+        work_dir = seed_runs_parent/"work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        orig_cwd = os.getcwd()
+        os.chdir(work_dir)
+        try:
+            # Train
+            train_losses, val_losses = trainer.train(train_loader, val_loader, num_epochs=20)
+
+            # Move any produced checkpoints and run dirs out of the work dir
+            seed_runs_parent.mkdir(parents=True, exist_ok=True)
+            for p in glob.glob("*.pth"):
+                shutil.move(p, seed_runs_parent/p)
+            local_runs = Path("runs")
+            if local_runs.exists():
+                for r in local_runs.glob("run_*"):
+                    dest = seed_runs_parent/r.name
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.move(str(r), str(dest))
+        finally:
+            os.chdir(orig_cwd)
 
         # Evaluate on test split
         # Build a test DataLoader
@@ -188,6 +263,12 @@ def main(num_seeds: int = 5):
 
         seed_dir = fig_dir/f"seed_{seed}"
         seed_dir.mkdir(exist_ok=True)
+        # Learning curves
+        plt.figure(figsize=(6,4))
+        plt.plot(train_losses, label='train')
+        plt.plot(val_losses, label='val')
+        plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title(f'Learning Curves (seed {seed})')
+        plt.legend(); plt.tight_layout(); plt.savefig(seed_dir/"learning_curves.png", dpi=200); plt.close()
         plot_roc_pr(y_true, scores, seed_dir, label=f"seed {seed}")
         plot_confusion(y_true, (scores>=0.5).astype(int), seed_dir/"confusion.png")
         threshold_sweep(y_true, scores, seed_dir/"threshold_sweep.png")
@@ -206,7 +287,7 @@ def main(num_seeds: int = 5):
     acc_m, acc_s = mstd(accs)
     auc_m, auc_s = mstd(aucs)
     summary = {
-        'seeds': num_seeds,
+        'seeds': len(seeds),
         'accuracy_mean': acc_m,
         'accuracy_std': acc_s,
         'auc_mean': auc_m,
@@ -219,6 +300,6 @@ def main(num_seeds: int = 5):
 
 
 if __name__ == "__main__":
-    main(num_seeds=5)
+    main()
 
 
