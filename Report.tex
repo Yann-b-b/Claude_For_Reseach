@@ -1,180 +1,125 @@
-N\documentclass{article}
-
+% !TEX program = pdflatex
+\documentclass{article}
 
 \usepackage{PRIMEarxiv}
-
-\usepackage[utf8]{inputenc} % allow utf-8 input
-\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
-\usepackage{hyperref}       % hyperlinks
-\usepackage{url}            % simple URL typesetting
-\usepackage{booktabs}       % professional-quality tables
-\usepackage{amsfonts}       % blackboard math symbols
-\usepackage{nicefrac}       % compact symbols for 1/2, etc.
-\usepackage{microtype}      % microtypography
-\usepackage{lipsum}
-\usepackage{fancyhdr}       % header
-\usepackage{graphicx}       % graphics
-\graphicspath{{media/}}     % organize your images and other figures under media/ folder
-
-%Header
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{fancyhdr}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\graphicspath{{./}{plots/}{ablation_study/reports/}}
+\usepackage{float}
+% Header
 \pagestyle{fancy}
 \thispagestyle{empty}
-\rhead{ \textit{ }} 
+\rhead{ \textit{ }}
+\fancyhead[LO]{Antimicrobial Activity Prediction}
 
-% Update your Headers here
-\fancyhead[LO]{Running Title for Header}
-% \fancyhead[RE]{Firstauthor and Secondauthor} % Firstauthor et al. if more than 2 - must use \documentclass[twoside]{article}
+% Title
+\title{Predicting Antimicrobial Activity of Peptides Against Specific Bacteria Using Machine Learning}
 
-
-
-  
-%% Title
-\title{A template for Arxiv Style
-%%%% Cite as
-%%%% Update your official citation here when published 
-\thanks{\textit{\underline{Citation}}: 
-\textbf{Authors. Title. Pages.... DOI:000000/11111.}} 
-}
-
-\author{
-  Author1, Author2 \\
-  Affiliation \\
-  Univ \\
-  City\\
-  \texttt{\{Author1, Author2\}email@email} \\
-  %% examples of more authors
-   \And
-  Author3 \\
-  Affiliation \\
-  Univ \\
-  City\\
-  \texttt{email@email} \\
-  %% \AND
-  %% Coauthor \\
-  %% Affiliation \\
-  %% Address \\
-  %% \texttt{email} \\
-  %% \And
-  %% Coauthor \\
-  %% Affiliation \\
-  %% Address \\
-  %% \texttt{email} \\
-  %% \And
-  %% Coauthor \\
-  %% Affiliation \\
-  %% Address \\
-  %% \texttt{email} \\
-}
-
+\author{Yann Baglin-Bunod \\
+UC San Diego \\
+\texttt{ybaglinbunod@ucsd.edu}}
 
 \begin{document}
 \maketitle
 
-
 \begin{abstract}
-\lipsum[1]
+I present a dual-sequence predictor of antimicrobial activity that takes a bacterial DNA segment and a peptide amino acid sequence as inputs and outputs a probability score indicating whether the peptide is likely to kill the bacterium. This project also investigates how Claude, an AI assistant, can be leveraged to accelerate code development for machine learning research. I describe the dataset, the Claude-generated baseline with a training/evaluation pipeline, and a multi-seed 70/15/15 split ablation study (ROC/PR, calibration, threshold sweeps). I report accuracy/ROC-AUC (mean~$\pm$~std) across seeds and release artifacts for reproducibility.
 \end{abstract}
 
 
-% keywords can be removed
-\keywords{First keyword \and Second keyword \and More}
+\section{Introduction / Background}
+Antimicrobial peptides (AMPs) are molecules that play a central role in the innate immune system by targeting and disrupting microbial cell membranes. They are increasingly studied as promising alternatives to conventional antibiotics, especially in the context of rising antimicrobial resistance. Predicting the activity of a peptide against a specific bacterium is a challenging task that traditionally requires expensive and time-consuming laboratory assays. Machine learning models offer the possibility of accelerating this process by leveraging sequence data to make rapid, scalable predictions.
 
+At the same time, AI coding assistants such as Claude are beginning to transform how researchers build and iterate on machine learning pipelines. They provide fast generation of boilerplate code, offer debugging suggestions, and can accelerate the experimental cycle. However, their outputs still require careful oversight and domain expertise to ensure scientific rigor. This paper explores both the biological modeling challenge and the methodological question of how Claude can be effectively used as a tool for machine learning research.
 
-\section{Introduction}
-\lipsum[2]
-\lipsum[3]
+\section{Dataset Development}
+The dataset for this project was curated and provided by Nam Do. I worked with the \texttt{train\_sequence.json} file, which contains peptide sequences paired with bacterial DNA segments and associated binary activity labels. This file had already been preprocessed into a format suitable for model training, ensuring consistency across inputs and outputs. It was used for both predictor development and evaluation experiments.
 
+The underlying data was assembled from DRAMP and related resources. It was consolidated information from multiple spreadsheets, including \texttt{general\_amps.xlsx} (11,613 entries), \texttt{clinical\_amps.xlsx}, \texttt{specific\_amps.xlsx}, \texttt{expanded\_amps.xlsx}, \texttt{stability\_amps.xlsx}, and \texttt{patent\_amps.xlsx}, which collectively provide peptide sequences, names, reported activities, structures, target organisms, and references. To standardize inputs, target organism names were cleaned to remove aliases, and representative genomes were retrieved from NCBI using the \texttt{datasets} CLI to build DNA context. 
+\section{Methods / Architecture}
 
-\section{Headings: first level}
-\label{sec:headings}
+The baseline model was first generated with Claude and then modified into a usable PyTorch script (\textbf{\texttt{antimicrobial\_predictor.py}}). For preprocessing, sequences are integer-tokenized and truncated or padded to fixed lengths (50 nucleotides for DNA and 100 amino acids for peptides). The architecture was fully generated by Claude. It consists of two branches: a DNA branch that applies an embedding layer, a convolutional neural network, and adaptive max pooling, and a peptide branch that applies an embedding layer, a two-layer bidirectional LSTM, an eight-head self-attention mechanism, and a masked global average pool (Figure~\ref{fig:media/model_overview.png}). The resulting feature representations are concatenated and passed through a multilayer perceptron classifier (MLP) with dropout and a sigmoid activation.  
 
-\lipsum[4] See Section \ref{sec:headings}.
+Training uses Adam (learning rate $1\times10^{-3}$), binary cross-entropy loss, weight decay $1\times10^{-5}$, gradient clipping, ReduceLROnPlateau scheduling, and early stopping. The best model according to validation accuracy is versioned, while per-epoch checkpoints are stored under \texttt{ablation\_study/runs/}.
 
-\subsection{Headings: second level}
-\lipsum[5]
-\begin{equation}
-\xi _{ij}(t)=P(x_{t}=i,x_{t+1}=j|y,v,w;\theta)= {\frac {\alpha _{i}(t)a^{w_t}_{ij}\beta _{j}(t+1)b^{v_{t+1}}_{j}(y_{t+1})}{\sum _{i=1}^{N} \sum _{j=1}^{N} \alpha _{i}(t)a^{w_t}_{ij}\beta _{j}(t+1)b^{v_{t+1}}_{j}(y_{t+1})}}
-\end{equation}
-
-\subsubsection{Headings: third level}
-\lipsum[6]
-
-\paragraph{Paragraph}
-\lipsum[7]
-
-\section{Examples of citations, figures, tables, references}
-\label{sec:others}
-\lipsum[8] \cite{kour2014real,kour2014fast} and see \cite{hadash2018estimate}.
-
-The documentation for \verb+natbib+ may be found at
-\begin{center}
-  \url{http://mirrors.ctan.org/macros/latex/contrib/natbib/natnotes.pdf}
-\end{center}
-Of note is the command \verb+\citet+, which produces citations
-appropriate for use in inline text.  For example,
-\begin{verbatim}
-   \citet{hasselmo} investigated\dots
-\end{verbatim}
-produces
-\begin{quote}
-  Hasselmo, et al.\ (1995) investigated\dots
-\end{quote}
-
-\begin{center}
-  \url{https://www.ctan.org/pkg/booktabs}
-\end{center}
-
-
-\subsection{Figures}
-\lipsum[10] 
-See Figure \ref{fig:fig1}. Here is how you add footnotes. \footnote{Sample of the first footnote.}
-\lipsum[11] 
-
-\begin{figure}
+\begin{figure}[htbp]
   \centering
-  \fbox{\rule[-.5cm]{4cm}{4cm} \rule[-.5cm]{4cm}{0cm}}
-  \caption{Sample figure caption.}
-  \label{fig:fig1}
+  \includegraphics[width=.5\linewidth]{media/model_overview.png}
+  \caption{level model overview (DNA branch, peptide branch, fusion, classifier).}
 \end{figure}
 
-\subsection{Tables}
-\lipsum[12]
-See awesome Table~\ref{tab:table}.
+\section{Results and Ablation Study}
+Initial validation experiments showed strong accuracy and ROC-AUC performance on the held-out validation set. We observed limitations with Claude’s code generation, as it occasionally proposed synthetic placeholder data in the absence of real inputs. To avoid misleading results, these were replaced with curated CSVs granted by Nam Do. Diagnostic checks including learning curves and sample predictions confirmed stable training behavior (see training history and model overview figures).
 
-\begin{table}
- \caption{Sample table title}
+\begin{figure}[H]
   \centering
-  \begin{tabular}{lll}
+  \includegraphics[width=.45\linewidth]{media/dna_length_stats.png}
+  \includegraphics[width=.45\linewidth]{media/protein_length_stats.png}
+  \caption{Sequence length summaries (DNA and peptide).}
+\end{figure}
+
+\noindent The threshold sweep (Figure~\ref{fig:thresh}) summarizes precision/recall trade-offs across operating points: we see that a threshold of 0.42 yields the highest F1 score as seen in the figure.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=.6\linewidth]{threshold_sweep.png}
+  \caption{Precision, recall, and F1 versus decision threshold on a representative seed.}
+  \label{fig:thresh}
+\end{figure}
+
+To evaluate the model, I adopted a 70/15/15 train/validation/test split with five different random seeds. For each seed, I measured test accuracy and ROC-AUC, reporting the mean and standard deviation across runs. In addition, I generated ROC and PR curves, calibration plots, threshold sweeps, confusion matrices, score distributions, and analyses of sequence length effects. These outputs are included in \texttt{ablation\_study/reports/}, providing a comprehensive picture of the model’s strengths and weaknesses under different evaluation settings. We can see from table~\ref{tab:summary} that the model achieves both high predictive performance and remarkable stability across random initializations, giving confidence that the reported accuracy are robust rather than seed-dependent.
+
+\noindent Example figures (update date/seed as needed):
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=.45\linewidth]{roc.png}
+  \includegraphics[width=.45\linewidth]{pr.png}
+  \caption{ROC and PR curves for a representative seed.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=.45\linewidth]{confusion.png}
+  \includegraphics[width=.45\linewidth]{calibration.png}
+  \caption{Confusion matrix (normalized) and calibration plot for a representative seed.}
+\end{figure}
+
+\noindent \textbf{Aggregate}: Table~\ref{tab:summary} summarizes the multi-seed test performance. Across five seeds, test accuracy averaged 0.8815 $\pm$ 0.0009 and ROC-AUC 0.9506 $\pm$ 0.0008, indicating strong discriminative performance with low variance across runs.
+
+\begin{table}[H]
+  \centering
+  \caption{Multi-seed test performance (mean $\pm$ std) over 5 seeds.}
+  \label{tab:summary}
+  \begin{tabular}{lcc}
     \toprule
-    \multicolumn{2}{c}{Part}                   \\
-    \cmidrule(r){1-2}
-    Name     & Description     & Size ($\mu$m) \\
+    Metric & Mean & Std \\
     \midrule
-    Dendrite & Input terminal  & $\sim$100     \\
-    Axon     & Output terminal & $\sim$10      \\
-    Soma     & Cell body       & up to $10^6$  \\
+    Accuracy & 0.8815 & 0.0009 \\
+    ROC-AUC  & 0.9506 & 0.0008 \\
     \bottomrule
   \end{tabular}
-  \label{tab:table}
 \end{table}
 
-\subsection{Lists}
-\begin{itemize}
-\item Lorem ipsum dolor sit amet
-\item consectetur adipiscing elit. 
-\item Aliquam dignissim blandit est, in dictum tortor gravida eget. In ac rutrum magna.
-\end{itemize}
+\section{Discussion}
+This project highlights both the strengths and limitations of combining automated code generation with domain expertise. As an individual with a background in machine learning, I was able to guide the model towards a working repository that successfully solved the expected problem. However, challenges remain, namely in dataset curation where the model was unable to develop a dataset for the task. While Claude accelerates boilerplate code generation and iteration, human expertise remains essential for curating data (thank you Nam Do), validating outputs, and interpreting results. 
 
+\section{Next Steps}
+Future work can extend to focusing on the 12\% holdouts that are not captured by the model. I propose conducting external tests against other datasets. Model improvements could focus on incorporating more data, orincluding transformer-based embeddings. 
 
 \section{Conclusion}
-Your conclusion here
+I built a functional dataset and dual-branch predictor, established an evaluation that cements the success of the model at the task at hand. This provides a foundation for continued research and extensions.
 
-\section*{Acknowledgments}
-This was was supported in part by......
-
-%Bibliography
-\bibliographystyle{unsrt}  
-\bibliography{references}  
+\section*{References}
+Nam Do (UC San Diego) who curating and shared the peptide–bacteria dataset used in this project.
 
 
 \end{document}

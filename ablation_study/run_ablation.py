@@ -238,6 +238,11 @@ def main():
                     shutil.move(str(r), str(dest))
         finally:
             os.chdir(orig_cwd)
+            # Clean up the temporary work directory to avoid nested folders
+            try:
+                shutil.rmtree(work_dir)
+            except Exception:
+                pass
 
         # Evaluate on test split
         # Build a test DataLoader
