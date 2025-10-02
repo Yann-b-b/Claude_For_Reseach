@@ -1,4 +1,4 @@
-### Antimicrobial Peptide–Bacteria Predictor (Claude Code Output)
+### Antimicrobial Peptide–Bacteria Predictor
 
 #### Overview
 Predicts whether a peptide kills a bacterium from two inputs: bacterial DNA sequence and peptide (protein) sequence.
