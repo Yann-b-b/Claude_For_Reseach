@@ -46,4 +46,4 @@ These runs demonstrate that the dual-branch model achieves both **high predictiv
    pip install -r requirements.txt
 2.	Run the training script with ablation mode enabled:
   ```bash
-  python antimicrobial_predictor.py --ablation --seeds 5
+  python ablation_study/run_ablation.py --num_seeds 5
