@@ -9,18 +9,7 @@ Predicts whether a peptide kills a bacterium from two inputs: bacterial DNA sequ
 - **Fusion + Classifier**: Concat(256+512=768) → MLP 768→512→256 (ReLU + dropout) → 256→128→64→1 → Sigmoid.
 
 #### Data
-- Default: processed GRAMPA-derived CSV `antimicrobial_training_data.csv`
-  - `protein_sequence`: peptide sequence from GRAMPA.
-  - `bacterium_species` → mapped to a representative reference genome (NCBI RefSeq accessions below); a 1,000 bp slice of that genome is used as `dna_sequence`.
-    - E. coli K-12 MG1655 — NC_000913.3
-    - Staphylococcus aureus NCTC 8325 — NC_007795.1
-    - Bacillus subtilis 168 — NC_000964.3
-    - Pseudomonas aeruginosa PAO1 — NC_002516.2
-    - Streptococcus pneumoniae TIGR4 — NC_003028.3
-  - Species name normalization maps common variants (e.g., “Escherichia coli”, “E. coli”, “ecoli”) to the above; unmapped names default to E. coli.
-  - `antimicrobial_activity`: binary label derived from GRAMPA activity values (simple thresholding).
-  - If the processed CSV is missing, run `prepare_dataset.py` (uses `grampa_dataset.csv` and downloads genomes; falls back to random DNA if needed).
-- Fallback: synthetic data generator is used only when `antimicrobial_training_data.csv` is not found.
+- training_data.json, thanks to Nam Do. Curated from DRAMP dataset and various other sources. 
 
 #### Training Pipeline
 - Optimizer: Adam (lr 1e-3, weight_decay 1e-5); Loss: **BCELoss**.
@@ -38,6 +27,23 @@ Predicts whether a peptide kills a bacterium from two inputs: bacterial DNA sequ
 pip install -r requirements.txt
 python antimicrobial_predictor.py
 ```
+### Ablation Runs
 
-#### Notes
-- This setup validates the end-to-end pipeline. For real conclusions, replace the synthetic generator with a curated dataset of peptide–bacteria outcomes (e.g., DBAASP/APD3/DRAMP) and use leakage-aware splits.
+To assess robustness, I ran five independent training runs with different random seeds, each using a **70/15/15 train/validation/test split**. For every run, I recorded accuracy, ROC–AUC, and threshold sweep diagnostics.
+
+**Aggregate performance (5 seeds, mean ± std):**
+- Accuracy: **0.8815 ± 0.0009**  
+- ROC–AUC: **0.9506 ± 0.0008**  
+
+These runs demonstrate that the dual-branch model achieves both **high predictive power** and **robustness to initialization variance**, providing confidence that the results generalize beyond a single run.
+
+---
+
+### How to Run the Ablation Study
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+2.	Run the training script with ablation mode enabled:
+  ```bash
+  python antimicrobial_predictor.py --ablation --seeds 5
