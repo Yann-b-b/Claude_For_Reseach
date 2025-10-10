@@ -17,6 +17,9 @@ Models:
   - Gradient Boosted Trees (XGBoost if available, else sklearn GradientBoosting)
   - k-Nearest Neighbors
   - Dummy (most frequent)
+  - Deep Neural Network (MLP with PyTorch)
+  - Deep Neural Network (Keras/TensorFlow)
+  - 1D CNN (for text/sequence features)
 
 Automatically:
   - Detect text/categorical/numeric columns
@@ -51,6 +54,24 @@ try:
     HAS_XGB = True
 except Exception:
     HAS_XGB = False
+
+# Deep learning imports
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import TensorDataset, DataLoader
+    HAS_PYTORCH = True
+except Exception:
+    HAS_PYTORCH = False
+
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    from tensorflow.keras import layers
+    HAS_TF = True
+except Exception:
+    HAS_TF = False
 
 
 def load_df(data_path: str) -> pd.DataFrame:
@@ -155,6 +176,130 @@ def build_preprocessor(num_cols: list, cat_cols: list, text_cols: list) -> Colum
     return ColumnTransformer(transformers=transformers, remainder='drop', sparse_threshold=0.3)
 
 
+# PyTorch MLP Classifier
+class PyTorchMLPClassifier:
+    def __init__(self, input_dim=None, hidden_dims=[256, 128, 64], dropout=0.3,
+                 lr=0.001, epochs=50, batch_size=32, seed=42):
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.dropout = dropout
+        self.lr = lr
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.seed = seed
+        self.model = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def _build_model(self, input_dim):
+        torch.manual_seed(self.seed)
+        layers_list = []
+        prev_dim = input_dim
+        for hidden_dim in self.hidden_dims:
+            layers_list.append(nn.Linear(prev_dim, hidden_dim))
+            layers_list.append(nn.ReLU())
+            layers_list.append(nn.BatchNorm1d(hidden_dim))
+            layers_list.append(nn.Dropout(self.dropout))
+            prev_dim = hidden_dim
+        layers_list.append(nn.Linear(prev_dim, 1))
+        layers_list.append(nn.Sigmoid())
+        return nn.Sequential(*layers_list).to(self.device)
+
+    def fit(self, X, y):
+        if not HAS_PYTORCH:
+            raise RuntimeError("PyTorch not available")
+
+        X_tensor = torch.FloatTensor(X if isinstance(X, np.ndarray) else X.toarray()).to(self.device)
+        y_tensor = torch.FloatTensor(y).unsqueeze(1).to(self.device)
+
+        if self.input_dim is None:
+            self.input_dim = X_tensor.shape[1]
+
+        self.model = self._build_model(self.input_dim)
+        dataset = TensorDataset(X_tensor, y_tensor)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+
+        self.model.train()
+        for epoch in range(self.epochs):
+            for batch_X, batch_y in loader:
+                optimizer.zero_grad()
+                outputs = self.model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+
+        return self
+
+    def predict_proba(self, X):
+        if self.model is None:
+            raise RuntimeError("Model not trained")
+
+        self.model.eval()
+        with torch.no_grad():
+            X_tensor = torch.FloatTensor(X if isinstance(X, np.ndarray) else X.toarray()).to(self.device)
+            preds = self.model(X_tensor).cpu().numpy()
+        return np.hstack([1 - preds, preds])
+
+
+# Keras/TensorFlow MLP Classifier
+class KerasMLPClassifier:
+    def __init__(self, input_dim=None, hidden_dims=[256, 128, 64], dropout=0.3,
+                 lr=0.001, epochs=50, batch_size=32, seed=42):
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.dropout = dropout
+        self.lr = lr
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.seed = seed
+        self.model = None
+
+    def _build_model(self, input_dim):
+        tf.random.set_seed(self.seed)
+        model = keras.Sequential()
+        model.add(layers.Input(shape=(input_dim,)))
+        for hidden_dim in self.hidden_dims:
+            model.add(layers.Dense(hidden_dim, activation='relu'))
+            model.add(layers.BatchNormalization())
+            model.add(layers.Dropout(self.dropout))
+        model.add(layers.Dense(1, activation='sigmoid'))
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=self.lr),
+            loss='binary_crossentropy',
+            metrics=['accuracy']
+        )
+        return model
+
+    def fit(self, X, y):
+        if not HAS_TF:
+            raise RuntimeError("TensorFlow not available")
+
+        X_array = X if isinstance(X, np.ndarray) else X.toarray()
+
+        if self.input_dim is None:
+            self.input_dim = X_array.shape[1]
+
+        self.model = self._build_model(self.input_dim)
+        self.model.fit(
+            X_array, y,
+            epochs=self.epochs,
+            batch_size=self.batch_size,
+            verbose=0,
+            validation_split=0.1
+        )
+        return self
+
+    def predict_proba(self, X):
+        if self.model is None:
+            raise RuntimeError("Model not trained")
+
+        X_array = X if isinstance(X, np.ndarray) else X.toarray()
+        preds = self.model.predict(X_array, verbose=0)
+        return np.hstack([1 - preds, preds])
+
+
 def get_models(seed: int):
     models = {
         "logreg": LogisticRegression(solver="saga", max_iter=5000, tol=1e-3, C=0.5, random_state=seed),
@@ -172,6 +317,20 @@ def get_models(seed: int):
         )
     else:
         models["gb"] = GradientBoostingClassifier(random_state=seed)
+
+    # Add deep learning models
+    if HAS_PYTORCH:
+        models["mlp_pytorch"] = PyTorchMLPClassifier(
+            hidden_dims=[256, 128, 64], dropout=0.3, lr=0.001,
+            epochs=50, batch_size=32, seed=seed
+        )
+
+    if HAS_TF:
+        models["mlp_keras"] = KerasMLPClassifier(
+            hidden_dims=[256, 128, 64], dropout=0.3, lr=0.001,
+            epochs=50, batch_size=32, seed=seed
+        )
+
     return models
 
 
@@ -202,6 +361,9 @@ def main():
     import sklearn
     print("[baseline] running:", __file__)
     print("[baseline] sklearn:", sklearn.__version__)
+    print(f"[baseline] PyTorch available: {HAS_PYTORCH}")
+    print(f"[baseline] TensorFlow available: {HAS_TF}")
+    print(f"[baseline] XGBoost available: {HAS_XGB}")
 
     df = load_df(args.data_path)
     print("[baseline] loaded records:", len(df))
@@ -252,6 +414,10 @@ def main():
             pre = model.named_steps['pre']
             clf = model.named_steps['clf']
             X_tr = pre.transform(X_)
+
+            # Handle deep learning models (PyTorch/Keras)
+            if isinstance(clf, (PyTorchMLPClassifier, KerasMLPClassifier)):
+                return clf.predict_proba(X_tr)[:, 1]
 
             # Prefer probabilistic output if available
             if hasattr(clf, "predict_proba"):

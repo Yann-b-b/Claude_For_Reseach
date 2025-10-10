@@ -382,23 +382,33 @@ def load_real_dataset():
     import pandas as pd
     import os
 
-    # Check if combined processed dataset exists
-    if os.path.exists('combined_amp_training_data.csv'):
-        print("Loading combined processed dataset...")
-        df = pd.read_csv('combined_amp_training_data.csv')
-        return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
-    elif os.path.exists('antimicrobial_training_data.csv'):
-        print("Loading processed dataset...")
-        df = pd.read_csv('antimicrobial_training_data.csv')
-        return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
-    # Fallback: look inside Dataset_and_train_sequence folder
-    else:
-        alt_path = os.path.join('Dataset_and_train_sequence', 'antimicrobial_training_data.csv')
-        if os.path.exists(alt_path):
-            print("Loading processed dataset from Dataset_and_train_sequence/...")
-            df = pd.read_csv(alt_path)
-            return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
-        raise SystemExit("No dataset found. Provide a CSV with columns dna_sequence, protein_sequence, antimicrobial_activity.")
+    # Load expanded dataset
+    dataset_path = os.path.join('Dataset_and_train_sequence', 'antimicrobial_training_data_expanded.csv')
+    if not os.path.exists(dataset_path):
+        raise SystemExit(f"Dataset not found at {dataset_path}. Please ensure the expanded dataset exists.")
+
+    print(f"Loading expanded dataset from {dataset_path}...")
+    df = pd.read_csv(dataset_path)
+
+    # Convert labels to integers (handle various formats: Yes/No, 1/0, etc.)
+    label_col = df['antimicrobial_activity'].astype(str).str.strip().str.lower()
+    label_mapping = {
+        '1': 1, '0': 0, '1.0': 1, '0.0': 0,
+        'yes': 1, 'no': 0,
+        'true': 1, 'false': 0,
+        'positive': 1, 'negative': 0
+    }
+    df['antimicrobial_activity'] = label_col.map(label_mapping)
+
+    # Drop rows with invalid labels
+    invalid_count = df['antimicrobial_activity'].isna().sum()
+    if invalid_count > 0:
+        print(f"Warning: Dropping {invalid_count} rows with invalid labels")
+        df = df.dropna(subset=['antimicrobial_activity'])
+
+    df['antimicrobial_activity'] = df['antimicrobial_activity'].astype(int)
+
+    return df['dna_sequence'].tolist(), df['protein_sequence'].tolist(), df['antimicrobial_activity'].tolist()
 
 if __name__ == "__main__":
     # Load real dataset or fall back to synthetic data
