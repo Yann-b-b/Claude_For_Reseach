@@ -1,3 +1,11 @@
+# Generated configs, caches, and checkpoints
+.DS_Store
+.claude/
+__pycache__/
+*.pyc
+*.pth
+ablation_study/reports/
+
 Antibacterial_predictor.xlsx
 peptides/
 Dataset_and_train_sequence/
