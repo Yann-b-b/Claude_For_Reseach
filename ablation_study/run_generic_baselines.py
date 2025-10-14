@@ -540,14 +540,14 @@ def get_models(seed: int):
     # Add deep learning models with consistent hyperparameters
     if HAS_PYTORCH:
         models["mlp_pytorch"] = PyTorchMLPClassifier(
-            hidden_dims=[256, 128, 64], dropout=0.3, lr=0.001,
-            epochs=50, batch_size=32, seed=seed, patience=5
+            hidden_dims=[256, 128, 64], dropout=0.3, lr=0.0001,
+            epochs=50, batch_size=32, seed=seed, patience=20
         )
 
     if HAS_TF:
         models["mlp_keras"] = KerasMLPClassifier(
-            hidden_dims=[256, 128, 64], dropout=0.3, lr=0.001,
-            epochs=50, batch_size=32, seed=seed, patience=5
+            hidden_dims=[256, 128, 64], dropout=0.3, lr=0.0001,
+            epochs=50, batch_size=32, seed=seed, patience=20
         )
 
     return models
