@@ -30,8 +30,10 @@ Automatically:
 
 import argparse
 import json
+import logging
+import os
 from pathlib import Path
-from typing import List
+from typing import List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -65,27 +67,54 @@ try:
 except Exception:
     HAS_PYTORCH = False
 
-try:
-    import tensorflow as tf
-    from tensorflow import keras
-    from tensorflow.keras import layers
-    HAS_TF = True
-except Exception:
+# Allow opt-out of TensorFlow baselines to avoid import-time hangs with Abseil locks.
+DISABLE_TF = os.environ.get("BASELINES_DISABLE_TF", "").strip().lower() in {"1", "true", "yes"}
+
+if not DISABLE_TF:
+    try:
+        import tensorflow as tf
+        from tensorflow import keras
+        from tensorflow.keras import layers
+        HAS_TF = True
+    except Exception:
+        HAS_TF = False
+else:
     HAS_TF = False
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(name)s] %(message)s'
+)
+logger = logging.getLogger('baseline')
 
 
 def load_df(data_path: str) -> pd.DataFrame:
+    """Load dataframe with error handling."""
     p = Path(data_path)
-    if p.suffix.lower() == ".json":
-        # Load array-of-objects JSON
-        with open(p, "r") as f:
-            data = json.load(f)
-        if not isinstance(data, list):
-            raise SystemExit("JSON must be an array of records (list of objects)")
-        df = pd.DataFrame(data)
-    else:
-        # Default to CSV
-        df = pd.read_csv(p)
+
+    if not p.exists():
+        raise SystemExit(f"Data file not found: {data_path}")
+
+    try:
+        if p.suffix.lower() == ".json":
+            # Load array-of-objects JSON
+            with open(p, "r") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                raise SystemExit("JSON must be an array of records (list of objects)")
+            df = pd.DataFrame(data)
+        else:
+            # Default to CSV
+            df = pd.read_csv(p)
+    except Exception as e:
+        raise SystemExit(f"Failed to load data from {data_path}: {e}")
+
+    if df.empty:
+        raise SystemExit("Loaded dataframe is empty")
+
+    if len(df) < 10:
+        logger.warning(f"Dataset is very small ({len(df)} samples). Results may be unreliable.")
 
     # Normalize label column to numeric 0/1 and a canonical name 'label'
     label_candidates = [
@@ -114,24 +143,29 @@ def load_df(data_path: str) -> pd.DataFrame:
     else:
         ser_str = ser.astype(str).str.strip().str.lower()
         mapping = {"1": 1, "0": 0, "yes": 1, "no": 0, "true": 1, "false": 0, "positive": 1, "negative": 0}
-        try:
-            df[found] = ser_str.map(mapping).fillna(ser).astype(int)
-        except Exception:
-            # If it was already numeric-like, coerce
-            df[found] = pd.to_numeric(ser, errors="raise").astype(int)
+        mapped = ser_str.map(mapping)
+
+        # Check for unmapped values
+        if mapped.isna().any():
+            unmapped_count = mapped.isna().sum()
+            # Try numeric conversion for unmapped values
+            try:
+                df[found] = pd.to_numeric(ser, errors="coerce").astype(int)
+                if df[found].isna().any():
+                    raise ValueError(f"{unmapped_count} labels could not be mapped to 0/1")
+            except Exception:
+                raise SystemExit(f"Could not convert all labels to binary (0/1). Found {unmapped_count} unmapped values.")
+        else:
+            df[found] = mapped.astype(int)
 
     # Rename to canonical 'label'
     if found != "label":
         df = df.rename(columns={found: "label"})
 
-    # Optional: fix common key typo from sample JSON
-    if "micoorganism_sequence" in df.columns and "microorganism_sequence" not in df.columns:
-        df = df.rename(columns={"micoorganism_sequence": "microorganism_sequence"})
-
     return df
 
 
-def detect_columns(df: pd.DataFrame, label_hint: List[str]) -> tuple[list, list, list, str]:
+def detect_columns(df: pd.DataFrame, label_hint: List[str]) -> Tuple[List[str], List[str], List[str], str]:
     # Determine label column
     label_col = None
     for cand in label_hint:
@@ -163,7 +197,7 @@ def detect_columns(df: pd.DataFrame, label_hint: List[str]) -> tuple[list, list,
     return num_cols, cat_cols, text_cols, label_col
 
 
-def build_preprocessor(num_cols: list, cat_cols: list, text_cols: list) -> ColumnTransformer:
+def build_preprocessor(num_cols: List[str], cat_cols: List[str], text_cols: List[str], n_samples: int) -> ColumnTransformer:
     transformers = []
     if num_cols:
         transformers.append(("num", StandardScaler(), num_cols))
@@ -171,15 +205,25 @@ def build_preprocessor(num_cols: list, cat_cols: list, text_cols: list) -> Colum
         enc = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
         transformers.append(("cat", enc, cat_cols))
     # For text, build TF-IDF per text column
+    # Adjust min_df based on dataset size to avoid dropping too many features
+    min_df = max(1, min(2, n_samples // 100))
     for c in text_cols:
-        transformers.append((f"tfidf_{c}", TfidfVectorizer(ngram_range=(1, 3), min_df=2), c))
+        transformers.append((
+            f"tfidf_{c}",
+            TfidfVectorizer(
+                ngram_range=(1, 3),
+                min_df=min_df,
+                max_features=5000
+            ),
+            c
+        ))
     return ColumnTransformer(transformers=transformers, remainder='drop', sparse_threshold=0.3)
 
 
 # PyTorch MLP Classifier
 class PyTorchMLPClassifier:
     def __init__(self, input_dim=None, hidden_dims=[256, 128, 64], dropout=0.3,
-                 lr=0.001, epochs=50, batch_size=32, seed=42):
+                 lr=0.001, epochs=50, batch_size=32, seed=42, patience=5, device=None):
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims
         self.dropout = dropout
@@ -187,8 +231,32 @@ class PyTorchMLPClassifier:
         self.epochs = epochs
         self.batch_size = batch_size
         self.seed = seed
+        self.patience = patience
         self.model = None
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.logger = logging.getLogger('mlp_pytorch')
+
+        # Auto-detect best device: CUDA > CPU (skip MPS due to potential hangs)
+        # Set PYTORCH_ENABLE_MPS_FALLBACK=1 environment variable to enable MPS
+        use_mps = os.environ.get("PYTORCH_ENABLE_MPS", "0") == "1"
+
+        if device:
+            self.device = torch.device(device)
+        elif torch.cuda.is_available():
+            self.device = torch.device('cuda')
+            self.logger.info("Using CUDA device")
+        elif use_mps and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            try:
+                self.device = torch.device('mps')
+                self.logger.info("Using MPS (Apple Silicon) device")
+                # Test MPS with a small operation
+                test_tensor = torch.zeros(1, device=self.device)
+                del test_tensor
+            except Exception as e:
+                self.logger.warning(f"MPS initialization failed: {e}, falling back to CPU")
+                self.device = torch.device('cpu')
+        else:
+            self.device = torch.device('cpu')
+            self.logger.info("Using CPU device")
 
     def _build_model(self, input_dim):
         torch.manual_seed(self.seed)
@@ -200,35 +268,127 @@ class PyTorchMLPClassifier:
             layers_list.append(nn.BatchNorm1d(hidden_dim))
             layers_list.append(nn.Dropout(self.dropout))
             prev_dim = hidden_dim
+        # No sigmoid here - will be handled by BCEWithLogitsLoss / in predict_proba
         layers_list.append(nn.Linear(prev_dim, 1))
-        layers_list.append(nn.Sigmoid())
         return nn.Sequential(*layers_list).to(self.device)
 
-    def fit(self, X, y):
+    def fit(self, X, y, X_val=None, y_val=None):
         if not HAS_PYTORCH:
             raise RuntimeError("PyTorch not available")
 
-        X_tensor = torch.FloatTensor(X if isinstance(X, np.ndarray) else X.toarray()).to(self.device)
-        y_tensor = torch.FloatTensor(y).unsqueeze(1).to(self.device)
+        self.logger.info("Starting fit: preprocessing arrays for training")
+        if isinstance(X, np.ndarray):
+            X_dense = np.asarray(X, dtype=np.float32)
+        else:
+            X_dense = np.asarray(X.toarray(), dtype=np.float32)
+        y_dense = np.asarray(y, dtype=np.float32)
+
+        positive = int(np.sum(y_dense >= 0.5))
+        negative = int(y_dense.size - positive)
+        self.logger.info(f"Input shapes → X: {X_dense.shape}, y: {y_dense.shape}")
+        self.logger.info(f"Class balance → pos: {positive}, neg: {negative}")
+
+        # Calculate class weights for imbalanced datasets
+        if positive > 0 and negative > 0:
+            pos_weight = negative / positive
+            self.logger.info(f"Using pos_weight={pos_weight:.2f} for class imbalance")
+        else:
+            pos_weight = 1.0
+
+        X_tensor = torch.tensor(X_dense, dtype=torch.float32, device=self.device)
+        y_tensor = torch.tensor(y_dense, dtype=torch.float32, device=self.device).unsqueeze(1)
+
+        # Prepare validation data if provided
+        if X_val is not None and y_val is not None:
+            if isinstance(X_val, np.ndarray):
+                X_val_dense = np.asarray(X_val, dtype=np.float32)
+            else:
+                X_val_dense = np.asarray(X_val.toarray(), dtype=np.float32)
+            y_val_dense = np.asarray(y_val, dtype=np.float32)
+            X_val_tensor = torch.tensor(X_val_dense, dtype=torch.float32, device=self.device)
+            y_val_tensor = torch.tensor(y_val_dense, dtype=torch.float32, device=self.device).unsqueeze(1)
 
         if self.input_dim is None:
             self.input_dim = X_tensor.shape[1]
 
         self.model = self._build_model(self.input_dim)
+        self.logger.info(f"Device: {self.device}, input_dim: {self.input_dim}, "
+                        f"epochs: {self.epochs}, batch_size: {self.batch_size}")
+
         dataset = TensorDataset(X_tensor, y_tensor)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        criterion = nn.BCELoss()
+        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight], device=self.device))
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
 
+        # Early stopping setup
+        best_val_loss = float('inf')
+        patience_counter = 0
+
         self.model.train()
+
         for epoch in range(self.epochs):
+            # Log progress every epoch
+            if epoch == 0 or (epoch + 1) % max(1, self.epochs // 10) == 0 or epoch == self.epochs - 1:
+                self.logger.info(f"Epoch {epoch + 1}/{self.epochs}")
+            epoch_loss = 0.0
+            epoch_correct = 0
+            samples_seen = 0
+
             for batch_X, batch_y in loader:
                 optimizer.zero_grad()
+                # Remove sigmoid from model output, use BCEWithLogitsLoss
                 outputs = self.model(batch_X)
+                # Temporarily change last layer output
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 optimizer.step()
+
+                batch_size_actual = batch_y.size(0)
+                epoch_loss += loss.item() * batch_size_actual
+                samples_seen += batch_size_actual
+
+                # For accuracy, apply sigmoid
+                preds = (torch.sigmoid(outputs) >= 0.5).float()
+                epoch_correct += (preds == batch_y).float().sum().item()
+
+            epoch_loss_avg = epoch_loss / max(1, len(dataset))
+            epoch_acc = epoch_correct / max(1, len(dataset))
+
+            # Validation
+            if X_val is not None and y_val is not None:
+                self.model.eval()
+                with torch.no_grad():
+                    val_outputs = self.model(X_val_tensor)
+                    val_loss = criterion(val_outputs, y_val_tensor).item()
+                    val_preds = (torch.sigmoid(val_outputs) >= 0.5).float()
+                    val_acc = (val_preds == y_val_tensor).float().mean().item()
+                self.model.train()
+
+                # Log only periodically to avoid spam
+                if epoch == 0 or (epoch + 1) % max(1, self.epochs // 10) == 0 or epoch == self.epochs - 1:
+                    self.logger.info(f"  train_loss: {epoch_loss_avg:.4f}, train_acc: {epoch_acc:.4f}, "
+                                   f"val_loss: {val_loss:.4f}, val_acc: {val_acc:.4f}")
+
+                # Early stopping
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    # Save best model state
+                    self.best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                else:
+                    patience_counter += 1
+
+                if patience_counter >= self.patience:
+                    self.logger.info(f"Early stopping at epoch {epoch + 1}")
+                    # Restore best model
+                    self.model.load_state_dict({k: v.to(self.device) for k, v in self.best_model_state.items()})
+                    break
+            else:
+                if epoch == 0 or (epoch + 1) % max(1, self.epochs // 10) == 0 or epoch == self.epochs - 1:
+                    self.logger.info(f"  train_loss: {epoch_loss_avg:.4f}, train_acc: {epoch_acc:.4f}")
+
+        self.logger.info("Training complete")
 
         return self
 
@@ -238,15 +398,20 @@ class PyTorchMLPClassifier:
 
         self.model.eval()
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X if isinstance(X, np.ndarray) else X.toarray()).to(self.device)
-            preds = self.model(X_tensor).cpu().numpy()
+            if isinstance(X, np.ndarray):
+                X_dense = np.asarray(X, dtype=np.float32)
+            else:
+                X_dense = np.asarray(X.toarray(), dtype=np.float32)
+            X_tensor = torch.tensor(X_dense, dtype=torch.float32, device=self.device)
+            logits = self.model(X_tensor)
+            preds = torch.sigmoid(logits).cpu().numpy()
         return np.hstack([1 - preds, preds])
 
 
 # Keras/TensorFlow MLP Classifier
 class KerasMLPClassifier:
     def __init__(self, input_dim=None, hidden_dims=[256, 128, 64], dropout=0.3,
-                 lr=0.001, epochs=50, batch_size=32, seed=42):
+                 lr=0.001, epochs=50, batch_size=32, seed=42, patience=5):
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims
         self.dropout = dropout
@@ -254,7 +419,9 @@ class KerasMLPClassifier:
         self.epochs = epochs
         self.batch_size = batch_size
         self.seed = seed
+        self.patience = patience
         self.model = None
+        self.logger = logging.getLogger('mlp_keras')
 
     def _build_model(self, input_dim):
         tf.random.set_seed(self.seed)
@@ -272,22 +439,63 @@ class KerasMLPClassifier:
         )
         return model
 
-    def fit(self, X, y):
+    def fit(self, X, y, X_val=None, y_val=None):
         if not HAS_TF:
             raise RuntimeError("TensorFlow not available")
 
         X_array = X if isinstance(X, np.ndarray) else X.toarray()
 
+        # Calculate class weights for imbalanced datasets
+        positive = int(np.sum(y >= 0.5))
+        negative = int(len(y) - positive)
+        if positive > 0 and negative > 0:
+            class_weight = {0: 1.0, 1: negative / positive}
+            self.logger.info(f"Using class_weight for class 1: {class_weight[1]:.2f}")
+        else:
+            class_weight = None
+
         if self.input_dim is None:
             self.input_dim = X_array.shape[1]
 
         self.model = self._build_model(self.input_dim)
+
+        class _LogCallback(keras.callbacks.Callback):
+            def __init__(self, logger, epochs: int):
+                super().__init__()
+                self._logger = logger
+                self._epochs = epochs
+
+            def on_epoch_end(self, epoch, logs=None):
+                logs = logs or {}
+                # Log only periodically
+                if epoch == 0 or (epoch + 1) % max(1, self._epochs // 10) == 0 or epoch + 1 == self._epochs:
+                    metrics = ", ".join([f"{k}: {v:.4f}" for k, v in logs.items() if isinstance(v, (int, float))])
+                    self._logger.info(f"Epoch {epoch + 1}/{self._epochs} - {metrics}")
+
+        callbacks = [_LogCallback(self.logger, self.epochs)]
+
+        # Add early stopping with validation data
+        if X_val is not None and y_val is not None:
+            X_val_array = X_val if isinstance(X_val, np.ndarray) else X_val.toarray()
+            callbacks.append(keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=self.patience,
+                restore_best_weights=True,
+                verbose=0
+            ))
+            validation_data = (X_val_array, y_val)
+        else:
+            validation_data = None
+
+        self.logger.info(f"input_dim={self.input_dim}, epochs={self.epochs}, batch_size={self.batch_size}")
         self.model.fit(
             X_array, y,
             epochs=self.epochs,
             batch_size=self.batch_size,
             verbose=0,
-            validation_split=0.1
+            validation_data=validation_data,
+            callbacks=callbacks,
+            class_weight=class_weight,
         )
         return self
 
@@ -301,15 +509,26 @@ class KerasMLPClassifier:
 
 
 def get_models(seed: int):
+    # Use class_weight='balanced' for sklearn models that support it
     models = {
-        "logreg": LogisticRegression(solver="saga", max_iter=5000, tol=1e-3, C=0.5, random_state=seed),
-        "svm_linear": SVC(kernel='linear', probability=False, random_state=seed),
-        "svm_rbf": SVC(kernel='rbf', probability=False, random_state=seed),
-        "rf": RandomForestClassifier(n_estimators=300, random_state=seed, n_jobs=-1),
+        "logreg": LogisticRegression(
+            solver="saga", max_iter=5000, tol=1e-3, C=0.5,
+            class_weight='balanced', random_state=seed
+        ),
+        "svm_linear": SVC(
+            kernel='linear', probability=False, class_weight='balanced', random_state=seed
+        ),
+        "svm_rbf": SVC(
+            kernel='rbf', probability=False, class_weight='balanced', random_state=seed
+        ),
+        "rf": RandomForestClassifier(
+            n_estimators=300, class_weight='balanced', random_state=seed, n_jobs=-1
+        ),
         "knn": KNeighborsClassifier(n_neighbors=15),
         "dummy_majority": DummyClassifier(strategy='most_frequent')
     }
     if HAS_XGB:
+        # XGBoost will use scale_pos_weight parameter, set in training
         models["xgb"] = XGBClassifier(
             n_estimators=400, max_depth=5, learning_rate=0.05,
             subsample=0.9, colsample_bytree=0.9, reg_lambda=1.0,
@@ -318,17 +537,17 @@ def get_models(seed: int):
     else:
         models["gb"] = GradientBoostingClassifier(random_state=seed)
 
-    # Add deep learning models
+    # Add deep learning models with consistent hyperparameters
     if HAS_PYTORCH:
         models["mlp_pytorch"] = PyTorchMLPClassifier(
             hidden_dims=[256, 128, 64], dropout=0.3, lr=0.001,
-            epochs=50, batch_size=32, seed=seed
+            epochs=50, batch_size=32, seed=seed, patience=5
         )
 
     if HAS_TF:
         models["mlp_keras"] = KerasMLPClassifier(
             hidden_dims=[256, 128, 64], dropout=0.3, lr=0.001,
-            epochs=50, batch_size=32, seed=seed
+            epochs=50, batch_size=32, seed=seed, patience=5
         )
 
     return models
@@ -356,19 +575,23 @@ def main():
     ap.add_argument("--data_path", required=True, type=str)
     ap.add_argument("--out_path", required=True, type=str)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--skip-dl", action="store_true", help="Skip deep learning models (faster)")
+    ap.add_argument("--models", type=str, default=None, help="Comma-separated list of models to run (e.g., logreg,rf,xgb)")
     args = ap.parse_args()
 
     import sklearn
-    print("[baseline] running:", __file__)
-    print("[baseline] sklearn:", sklearn.__version__)
-    print(f"[baseline] PyTorch available: {HAS_PYTORCH}")
-    print(f"[baseline] TensorFlow available: {HAS_TF}")
-    print(f"[baseline] XGBoost available: {HAS_XGB}")
+    logger.info(f"Running: {__file__}")
+    logger.info(f"sklearn: {sklearn.__version__}")
+    logger.info(f"PyTorch available: {HAS_PYTORCH}")
+    logger.info(f"TensorFlow available: {HAS_TF}")
+    logger.info(f"XGBoost available: {HAS_XGB}")
 
     df = load_df(args.data_path)
-    print("[baseline] loaded records:", len(df))
+    logger.info(f"Loaded records: {len(df)}")
     label_hints = ["label", "antimicrobial_activity", "y", "target", "class"]
     num_cols, cat_cols, text_cols, label_col = detect_columns(df, label_hints)
+
+    logger.info(f"Feature columns: {len(num_cols)} numeric, {len(cat_cols)} categorical, {len(text_cols)} text")
 
     y = df[label_col].astype(int).to_numpy()
     X = df.drop(columns=[label_col])
@@ -378,84 +601,94 @@ def main():
     X_temp, X_test, y_temp, y_test = train_test_split(
         X, y, test_size=0.15, random_state=args.seed, stratify=y
     )
-    # Second: from the remaining 85%, take 15% as validation -> 0.15 / 0.85 ≈ 0.176470588
+    # Second: from the remaining 85%, take ~15% as validation -> 0.15 / 0.85 ≈ 0.176
+    val_ratio = 0.15 / 0.85
     X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=0.17647058823529413, random_state=args.seed, stratify=y_temp
+        X_temp, y_temp, test_size=val_ratio, random_state=args.seed, stratify=y_temp
     )
 
-    print("[baseline] split sizes:", {
-        "train": len(y_train), "val": len(y_val), "test": len(y_test)
-    })
+    logger.info(f"Split sizes - train: {len(y_train)}, val: {len(y_val)}, test: {len(y_test)}")
+    logger.info(f"Train class distribution: {np.sum(y_train)}/{len(y_train)} positive")
 
-    pre = build_preprocessor(num_cols, cat_cols, text_cols)
-    models = get_models(args.seed)
+    pre = build_preprocessor(num_cols, cat_cols, text_cols, len(y_train))
+    all_models = get_models(args.seed)
+
+    # Filter models based on arguments
+    if args.skip_dl:
+        models = {k: v for k, v in all_models.items() if k not in ['mlp_pytorch', 'mlp_keras']}
+        logger.info("Skipping deep learning models")
+    elif args.models:
+        selected = [m.strip() for m in args.models.split(',')]
+        models = {k: v for k, v in all_models.items() if k in selected}
+        logger.info(f"Running only: {', '.join(models.keys())}")
+    else:
+        models = all_models
+
+    logger.info(f"Training {len(models)} models")
 
     results = {}
-    for name, clf in tqdm(models.items(), desc="[baseline] Training models", unit="model"):
-        tqdm.write(f"[baseline] ▶ Training {name} ...")
+    for name, clf in models.items():
+        logger.info(f"▶ Training {name} ...")
         t0 = time.time()
-        pipe = Pipeline([
-            ("pre", pre),
-            ("clf", clf)
-        ])
-        if name in ["svm_linear", "svm_rbf"]:
-            tqdm.write(f"[baseline][DEBUG] Starting fit for {name} ...")
-            t_fit_start = time.time()
-        pipe.fit(X_train, y_train)
-        if name in ["svm_linear", "svm_rbf"]:
-            tqdm.write(f"[baseline][DEBUG] Finished fit for {name} in {time.time() - t_fit_start:.2f}s")
-            tqdm.write(f"[baseline][DEBUG] Now scoring {name} on validation set ...")
-        tqdm.write(f"[baseline] ✓ Finished {name} in {time.time() - t0:.1f}s")
-        # Helper to get probabilistic scores in [0,1]
-        def _scores(model, X_):
-            # Compute scores without invoking Pipeline.predict_proba to avoid
-            # scikit-learn 1.6.x third-party __sklearn_tags__ compatibility issues
-            # (e.g., with some xgboost versions).
-            pre = model.named_steps['pre']
-            clf = model.named_steps['clf']
-            X_tr = pre.transform(X_)
 
+        # Preprocess data once
+        X_train_pre = pre.fit_transform(X_train)
+        X_val_pre = pre.transform(X_val)
+        X_test_pre = pre.transform(X_test)
+
+        # For deep learning models, pass validation data
+        if isinstance(clf, (PyTorchMLPClassifier, KerasMLPClassifier)):
+            clf.fit(X_train_pre, y_train, X_val=X_val_pre, y_val=y_val)
+        else:
+            # Handle XGBoost scale_pos_weight
+            if name == "xgb" and HAS_XGB:
+                positive = int(np.sum(y_train))
+                negative = int(len(y_train) - positive)
+                if positive > 0:
+                    scale_pos_weight = negative / positive
+                    clf.set_params(scale_pos_weight=scale_pos_weight)
+            clf.fit(X_train_pre, y_train)
+
+        logger.info(f"✓ Finished {name} in {time.time() - t0:.1f}s")
+
+        # Helper to get probabilistic scores in [0,1]
+        def _scores(clf_model, X_transformed):
             # Handle deep learning models (PyTorch/Keras)
-            if isinstance(clf, (PyTorchMLPClassifier, KerasMLPClassifier)):
-                return clf.predict_proba(X_tr)[:, 1]
+            if isinstance(clf_model, (PyTorchMLPClassifier, KerasMLPClassifier)):
+                return clf_model.predict_proba(X_transformed)[:, 1]
 
             # Prefer probabilistic output if available
-            if hasattr(clf, "predict_proba"):
+            if hasattr(clf_model, "predict_proba"):
                 try:
-                    return clf.predict_proba(X_tr)[:, 1]
+                    return clf_model.predict_proba(X_transformed)[:, 1]
                 except Exception:
                     # Fall through to decision_function if predict_proba fails
                     pass
 
-            if hasattr(clf, "decision_function"):
-                s = clf.decision_function(X_tr)
+            if hasattr(clf_model, "decision_function"):
+                s = clf_model.decision_function(X_transformed)
                 s_min, s_max = s.min(), s.max()
                 return (s - s_min) / (s_max - s_min + 1e-9)
 
             # Last resort: use class predictions as scores
-            return clf.predict(X_tr).astype(float)
+            return clf_model.predict(X_transformed).astype(float)
 
-        if name in ["svm_linear", "svm_rbf"]:
-            t_val_start = time.time()
-        scores_val = _scores(pipe, X_val)
-        if name in ["svm_linear", "svm_rbf"]:
-            tqdm.write(f"[baseline][DEBUG] Validation scoring took {time.time() - t_val_start:.2f}s")
-            tqdm.write(f"[baseline][DEBUG] Now scoring {name} on test set ...")
-            t_test_start = time.time()
-        scores_test = _scores(pipe, X_test)
-        if name in ["svm_linear", "svm_rbf"]:
-            tqdm.write(f"[baseline][DEBUG] Test scoring took {time.time() - t_test_start:.2f}s")
+        scores_val = _scores(clf, X_val_pre)
+        scores_test = _scores(clf, X_test_pre)
+
         results[name] = {
             "val": evaluate(y_val, scores_val),
             "test": evaluate(y_test, scores_test),
         }
+        logger.info(f"{name} - val_f1: {results[name]['val']['f1_score']:.4f}, "
+                   f"test_f1: {results[name]['test']['f1_score']:.4f}")
 
     out_path = Path(args.out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    print("[baseline] Writing results to:", out_path)
+    logger.info(f"Writing results to: {out_path}")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
-    print("Wrote", out_path)
+    logger.info(f"Wrote {out_path}")
 
 
 if __name__ == "__main__":
