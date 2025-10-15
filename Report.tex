@@ -14,7 +14,7 @@
 \usepackage{graphicx}
 \usepackage{enumitem}
 \graphicspath{{./}{plots/}{ablation_study/reports/}}
-\usepackage{float}
+
 % Header
 \pagestyle{fancy}
 \thispagestyle{empty}
@@ -22,9 +22,9 @@
 \fancyhead[LO]{Antimicrobial Activity Prediction}
 
 % Title
-\title{Predicting Antimicrobial Activity of Peptides Against Specific Bacteria Using Machine Learning}
+\title{Peptide--Bacterium Antimicrobial Activity Prediction\\Model, Dataset, and Evaluation Report}
 
-\author{Yann Baglin-Bunod \\
+\author{Yann Baglin\-Bunod \\
 UC San Diego \\
 \texttt{ybaglinbunod@ucsd.edu}}
 
@@ -32,115 +32,86 @@ UC San Diego \\
 \maketitle
 
 \begin{abstract}
-I present a dual-sequence predictor of antimicrobial activity that takes a bacterial DNA segment and a peptide amino acid sequence as inputs and outputs a probability score indicating whether the peptide is likely to kill the bacterium. This project also investigates how Claude, an AI assistant, can be leveraged to accelerate code development for machine learning research. I describe the dataset, the Claude-generated baseline with a training/evaluation pipeline, and a multi-seed 70/15/15 split ablation study (ROC/PR, calibration, threshold sweeps). I report accuracy/ROC-AUC (mean~$\pm$~std) across seeds and release artifacts for reproducibility.
+We present a dual\-sequence predictor of antimicrobial activity that takes a short bacterial DNA segment and a peptide amino acid sequence as inputs and outputs a binary probability of killing. We describe dataset construction, a Claude\-generated baseline refined into a robust training/evaluation pipeline, and a multi\-seed 70/15/15 split ablation study (ROC/PR, calibration, threshold sweeps). We report accuracy/ROC\-AUC (mean~$\pm$~std) across seeds and release artifacts for reproducibility.
 \end{abstract}
 
+\keywords{Antimicrobial peptides, sequence modeling, evaluation, ROC\-AUC, ablation}
 
 \section{Introduction / Background}
-Antimicrobial peptides (AMPs) are molecules that play a central role in the innate immune system by targeting and disrupting microbial cell membranes. They are increasingly studied as promising alternatives to conventional antibiotics, especially in the context of rising antimicrobial resistance. Predicting the activity of a peptide against a specific bacterium is a challenging task that traditionally requires expensive and time-consuming laboratory assays. Machine learning models offer the possibility of accelerating this process by leveraging sequence data to make rapid, scalable predictions.
+\begin{itemize}[leftmargin=*,nosep]
+  \item \textbf{Context}: Predict whether a peptide kills a bacterium from sequence inputs.
+  \item \textbf{Original direction}: Prompted reasoning models (PRMs), BrowseComp, DreamPRM. Scope shifted per supervisor guidance to a concrete ML task.
+  \item \textbf{Supervisor guidance}: Prof. Xie suggested pivoting from PRM to a peptide--bacteria prediction system to test Claude\-generated code in a real pipeline.
+\end{itemize}
 
-At the same time, AI coding assistants such as Claude are beginning to transform how researchers build and iterate on machine learning pipelines. They provide fast generation of boilerplate code, offer debugging suggestions, and can accelerate the experimental cycle. However, their outputs still require careful oversight and domain expertise to ensure scientific rigor. This paper explores both the biological modeling challenge and the methodological question of how Claude can be effectively used as a tool for machine learning research.
+\section{Objectives}
+\begin{itemize}[leftmargin=*,nosep]
+  \item Build a working model that predicts peptide lethality given peptide and bacterial DNA.
+  \item Subtasks: dataset creation/integration, model implementation, rigorous testing of Claude\-generated code.
+  \item Constraints: no single ready\-made dataset; multiple sources must be cleaned/merged into training format.
+\end{itemize}
 
 \section{Dataset Development}
-The dataset for this project was curated and provided by Nam Do. I worked with the \texttt{train\_sequence.json} file, which contains peptide sequences paired with bacterial DNA segments and associated binary activity labels. This file had already been preprocessed into a format suitable for model training, ensuring consistency across inputs and outputs. It was used for both predictor development and evaluation experiments.
+\begin{itemize}[leftmargin=*,nosep]
+  \item \textbf{Sources}: Materials provided (e.g., target\_organism folder, activity spreadsheets, PubMed abstracts), general AMP databases (e.g., DRAMP), plus a consolidated JSON (\texttt{train\_sequence.json}) when available.
+  \item \textbf{Challenges}: Fragmentation, schema inconsistency, missing per\-organism labels; required harmonization.
+  \item \textbf{Processing}: Cleaning, normalization, mapping to a unified schema with fields: \texttt{dna\_sequence}, \texttt{protein\_sequence}, \texttt{antimicrobial\_activity}~(0/1). Resulting CSVs are consumed directly by the trainer.
+  \item \textbf{Notes}: README descriptions and external database references (e.g., DRAMP) guided integration.
+\end{itemize}
 
-The underlying data was assembled from DRAMP and related resources. It was consolidated information from multiple spreadsheets, including \texttt{general\_amps.xlsx} (11,613 entries), \texttt{clinical\_amps.xlsx}, \texttt{specific\_amps.xlsx}, \texttt{expanded\_amps.xlsx}, \texttt{stability\_amps.xlsx}, and \texttt{patent\_amps.xlsx}, which collectively provide peptide sequences, names, reported activities, structures, target organisms, and references. To standardize inputs, target organism names were cleaned to remove aliases, and representative genomes were retrieved from NCBI using the \texttt{datasets} CLI to build DNA context. 
-\section{Methods / Architecture}
+\section{Methods / Modeling}
+\begin{itemize}[leftmargin=*,nosep]
+  \item \textbf{Baseline}: Claude\-generated PyTorch model refined into a stable script (\texttt{antimicrobial\_predictor.py}).
+  \item \textbf{Architecture}: Two branches: DNA (Embedding\,$\rightarrow$\,CNN\,$\rightarrow$\,AdaptiveMaxPool) and peptide (Embedding\,$\rightarrow$\,2\-layer BiLSTM\,$\rightarrow$\,8\-head self\-attention\,$\rightarrow$\,masked global average pool). Features are concatenated and fed to an MLP classifier with dropout and sigmoid.
+  \item \textbf{Preprocessing}: Integer tokenization; fixed lengths (DNA~50 nt, peptide~100 aa). Length stats: see plots in \texttt{plots/}.
+  \item \textbf{Training}: Adam (lr 1e\-3), BCE loss, weight decay 1e\-5, gradient clipping, ReduceLROnPlateau, early stopping. Best model by validation accuracy is versioned; per\-epoch checkpoints saved under \texttt{ablation\_study/runs/}.
+\end{itemize}
 
-The baseline model was first generated with Claude and then modified into a usable PyTorch script (\textbf{\texttt{antimicrobial\_predictor.py}}). For preprocessing, sequences are integer-tokenized and truncated or padded to fixed lengths (50 nucleotides for DNA and 100 amino acids for peptides). The architecture was first generated by Claude, then modified by me. It consists of two branches: a DNA branch that applies an embedding layer, a convolutional neural network, and adaptive max pooling, and a peptide branch that applies an embedding layer, a two-layer bidirectional LSTM, an eight-head self-attention mechanism, and a masked global average pool (Figure~\ref{fig:media/model_overview.png}). The resulting feature representations are concatenated and passed through a multilayer perceptron classifier (MLP) with dropout and a sigmoid activation.  
+\section{Results / Preliminary Findings}
+\begin{itemize}[leftmargin=*,nosep]
+  \item \textbf{Initial validation}: Strong val accuracy and ROC\-AUC on in\-split validation.
+  \item \textbf{Claude limitations}: When no data were available, Claude proposed synthetic placeholders; these were replaced by curated CSVs to avoid misleading results.
+  \item \textbf{Diagnostics}: Learning curves and sample predictions verified stable training; see \texttt{plots/training\_history.png} and \texttt{plots/model\_overview.png}.
+\end{itemize}
 
-Training uses Adam (learning rate $1\times10^{-3}$), binary cross-entropy loss, weight decay $1\times10^{-5}$, gradient clipping, ReduceLROnPlateau scheduling, and early stopping. The best model according to validation accuracy is versioned, while per-epoch checkpoints are stored under \texttt{ablation\_study/runs/}.
-
-\begin{figure}[htbp]
-  \centering
-  \includegraphics[width=.5\linewidth]{media/model_overview.png}
-  \caption{level model overview (DNA branch, peptide branch, fusion, classifier).}
-\end{figure}
-
-\section{Results and Ablation Study}
-Initial validation experiments showed strong accuracy and ROC-AUC performance on the held-out validation set. We observed limitations with Claude’s code generation, as it occasionally proposed synthetic placeholder data in the absence of real inputs. To avoid misleading results, these were replaced with curated CSVs granted by Nam Do. Diagnostic checks including learning curves and sample predictions confirmed stable training behavior (see training history and model overview figures).
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=.45\linewidth]{media/dna_length_stats.png}
-  \includegraphics[width=.45\linewidth]{media/protein_length_stats.png}
-  \caption{Sequence length summaries (DNA and peptide).}
-\end{figure}
-
-\noindent The threshold sweep (Figure~\ref{fig:thresh}) summarizes precision/recall trade-offs across operating points: we see that a threshold of 0.42 yields the highest F1 score as seen in the figure.
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=.6\linewidth]{threshold_sweep.png}
-  \caption{Precision, recall, and F1 versus decision threshold on a representative seed.}
-  \label{fig:thresh}
-\end{figure}
-
-To evaluate the model, I adopted a 70/15/15 train/validation/test split with five different random seeds. For each seed, I measured test accuracy and ROC-AUC, reporting the mean and standard deviation across runs. In addition, I generated ROC and PR curves, calibration plots, threshold sweeps, confusion matrices, score distributions, and analyses of sequence length effects. These outputs are included in \texttt{ablation\_study/reports/}, providing a comprehensive picture of the model’s strengths and weaknesses under different evaluation settings. We can see from table~\ref{tab:summary} that the model achieves both high predictive performance and remarkable stability across random initializations, giving confidence that the reported accuracy are robust rather than seed-dependent.
+\section{Ablation Study and Robust Evaluation}
+\textbf{Protocol}: 70/15/15 train/val/test split; 5 random seeds; report test accuracy and ROC\-AUC (mean~$\pm$~std). For each seed, we generate ROC/PR curves, calibration plots, threshold sweeps, confusion matrices, score distributions, and length\-effect plots. Outputs are under \texttt{ablation\_study/reports/}.
 
 \noindent Example figures (update date/seed as needed):
-\begin{figure}[H]
+\begin{figure}[h]
   \centering
-  \includegraphics[width=.45\linewidth]{roc.png}
-  \includegraphics[width=.45\linewidth]{pr.png}
+  \includegraphics[width=.45\linewidth]{ablation_study/reports/grampa_split70-15-15_seed5_YYYYMMDD/figures/seed_42/roc.png}
+  \includegraphics[width=.45\linewidth]{ablation_study/reports/grampa_split70-15-15_seed5_YYYYMMDD/figures/seed_42/pr.png}
   \caption{ROC and PR curves for a representative seed.}
 \end{figure}
 
-\begin{figure}[H]
+\begin{figure}[h]
   \centering
-  \includegraphics[width=.45\linewidth]{confusion.png}
-  \includegraphics[width=.45\linewidth]{calibration.png}
+  \includegraphics[width=.45\linewidth]{ablation_study/reports/grampa_split70-15-15_seed5_YYYYMMDD/figures/seed_42/confusion.png}
+  \includegraphics[width=.45\linewidth]{ablation_study/reports/grampa_split70-15-15_seed5_YYYYMMDD/figures/seed_42/calibration.png}
   \caption{Confusion matrix (normalized) and calibration plot for a representative seed.}
 \end{figure}
 
-\noindent \textbf{Aggregate}: Table~\ref{tab:summary} summarizes the multi-seed test performance. Across five seeds, test accuracy averaged 0.8815 $\pm$ 0.0009 and ROC-AUC 0.9506 $\pm$ 0.0008, indicating strong discriminative performance with low variance across runs.
-
-\begin{table}[H]
-  \centering
-  \caption{Multi-seed test performance (mean $\pm$ std) over 5 seeds.}
-  \label{tab:summary}
-  \begin{tabular}{lcc}
-    \toprule
-    Metric & Mean & Std \\
-    \midrule
-    Accuracy & 0.8815 & 0.0009 \\
-    ROC-AUC  & 0.9506 & 0.0008 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\noindent \textbf{Baseline Comparison}: Table~\ref{tab:baselines} compares our custom model against standard machine learning baselines on the same dataset using a 70/15/15 split. While our dual-branch architecture achieves the highest accuracy (88.1\%), F1-score (87.8\%), and ROC-AUC (95.1\%), the improvement over KNN is modest—only 1.7\% in accuracy and 2.4\% in ROC-AUC. XGBoost achieves higher precision (91.7\% vs 89.7\%) but significantly lower recall (73.9\% vs 86.0\%). The substantial gap between our model and simple baselines like logistic regression or SVMs suggests the task benefits from sequence-specific modeling, but the close performance with KNN indicates that complex architectures may not always be necessary for this dataset.
-
-\begin{table}[H]
-  \centering
-  \caption{Model performance comparison on antimicrobial activity prediction task.}
-  \label{tab:baselines}
-  \begin{tabular}{lccccc}
-    \toprule
-    Model & Accuracy & Precision & Recall & F1-Score & ROC-AUC \\
-    \midrule
-    \textbf{My Model} & \textbf{88.1} & 89.7 & 86.0 & \textbf{87.8} & \textbf{95.1} \\
-    KNN & 86.4 & 89.4 & 82.6 & 85.9 & 92.7 \\
-    XGBoost & 83.6 & \textbf{91.7} & 73.9 & 81.8 & 91.0 \\
-    Random Forest & 78.9 & 82.9 & 73.0 & 77.6 & 86.2 \\
-    Logistic Regression & 50.6 & 50.3 & \textbf{87.1} & 63.8 & 49.7 \\
-    SVM RBF & 53.0 & 52.1 & 72.6 & 60.7 & 50.6 \\
-    SVM Linear & 49.2 & 49.2 & 50.2 & 49.7 & 52.8 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
+\noindent \textbf{Aggregate}: The JSON summary at \texttt{.../tables/summary.json} contains \texttt{accuracy\_mean}, \texttt{accuracy\_std}, \texttt{auc\_mean}, \texttt{auc\_std}. These constitute the headline numbers for the report.
 
 \section{Discussion}
-This project highlights both the strengths and limitations of combining automated code generation with domain expertise. As an individual with a background in machine learning, I was able to guide the model towards a working repository that successfully solved the expected problem. However, challenges remain, namely in dataset curation where the model was unable to develop a dataset for the task. While Claude accelerates boilerplate code generation and iteration, human expertise remains essential for curating data (thank you Nam Do), validating outputs, and interpreting results. 
+\begin{itemize}[leftmargin=*,nosep]
+  \item \textbf{Strengths}: End\-to\-end automation; clear, reproducible evaluation; artifacts versioned; actionable diagnostics.
+  \item \textbf{Limitations}: Data quality and label curation; potential leakage risks without grouped splits; DNA context as short segments rather than mechanistic targets.
+  \item \textbf{Expectations vs. reality}: Claude accelerates boilerplate generation but needs careful data/validity checks; human curation remains essential.
+\end{itemize}
 
 \section{Next Steps}
-Future work can extend to focusing on the 12\% holdouts that are not captured by the model. I propose conducting external tests against other datasets. Model improvements could focus on incorporating more data, orincluding transformer-based embeddings. 
+\begin{itemize}[leftmargin=*,nosep]
+  \item Peptide\-only vs dual\-input ablations; organism\-aware external tests (e.g., standardized MIC from DRAMP/DBAASP).
+  \item Improved features (learned embeddings/transformers), class balancing, and probability calibration.
+  \item Bridge back to PRM/multimodal evaluation (e.g., compare model recommendations under language\-guided constraints).
+\end{itemize}
 
 \section{Conclusion}
-I built a functional dataset and dual-branch predictor, established an evaluation that cements the success of the model at the task at hand. This provides a foundation for continued research and extensions.
+We built a functional dataset and dual\-branch predictor, established a robust 70/15/15 multi\-seed evaluation, and generated comprehensive figures and artifacts. This provides a solid foundation for continued research and extensions.
 
 \section*{References}
-Nam Do (UC San Diego) who curating and shared the peptide–bacteria dataset used in this project.
-
+Relevant datasets and literature (to be expanded): DRAMP, DBAASP; DreamPRM; peptide--bacteria activity studies.
 
 \end{document}
