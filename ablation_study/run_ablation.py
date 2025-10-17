@@ -173,9 +173,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--num_seeds", type=int, default=5)
     ap.add_argument("--exp_dir", type=str, default="", help="Optional existing report dir under ablation_study/reports to resume")
+    ap.add_argument(
+        "--data_path",
+        type=str,
+        default="Dataset_and_train_sequence/antimicrobial_training_data_expanded.csv",
+        help="Path to the extended dataset CSV/JSON (defaults to expanded CSV under Dataset_and_train_sequence/).",
+    )
     args = ap.parse_args()
 
-    dna, pep, y = load_real_dataset()
+    dna, pep, y = load_real_dataset(args.data_path)
 
     exp_dir = resolve_exp_dir(args.num_seeds, args.exp_dir or None)
     fig_dir = exp_dir/"figures"
@@ -306,5 +312,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

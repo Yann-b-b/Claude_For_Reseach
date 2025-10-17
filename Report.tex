@@ -74,6 +74,28 @@ We present a dual\-sequence predictor of antimicrobial activity that takes a sho
   \item \textbf{Diagnostics}: Learning curves and sample predictions verified stable training; see \texttt{plots/training\_history.png} and \texttt{plots/model\_overview.png}.
 \end{itemize}
 
+\noindent\textbf{Classical baselines (validation/test)} from \texttt{run\_generic\_baselines.py} are summarised in Table~\ref{tab:baselines}. Random forests, $k$-nearest neighbours, and gradient boosted trees achieve the strongest test ROC\-AUC, while both PyTorch and Keras multilayer perceptrons underperform tree\-based methods despite the additional nonlinear capacity.
+
+\begin{table}[h]
+  \centering
+  \caption{Performance of baseline models; metrics are rounded to three decimals.}
+  \label{tab:baselines}
+  \begin{tabular}{lccccc}
+    \toprule
+    Model & Val Acc & Val ROC-AUC & Test Acc & Test ROC-AUC & Test F1 \\
+    \midrule
+    Logistic Regression & 0.512 & 0.506 & 0.506 & 0.497 & 0.638 \\
+    Random Forest & 0.801 & 0.874 & 0.789 & 0.862 & 0.776 \\
+    $k$-NN ($k=5$) & 0.863 & 0.922 & 0.864 & 0.927 & 0.859 \\
+    XGBoost & 0.842 & 0.908 & 0.837 & 0.910 & 0.821 \\
+    MLP (PyTorch) & 0.585 & 0.617 & 0.584 & 0.613 & 0.614 \\
+    MLP (Keras) & 0.599 & 0.627 & 0.593 & 0.625 & 0.610 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent\textbf{Final dual-branch predictor}: The latest validation snapshot of \texttt{antimicrobial\_predictor.py} records accuracy~0.9343, precision~0.8913, recall~0.6965, F1~0.7820, and ROC\-AUC~0.9503. These metrics reflect the combined peptide\,+\,DNA architecture after hyperparameter refinements guided by the ablation study.
+
 \section{Ablation Study and Robust Evaluation}
 \textbf{Protocol}: 70/15/15 train/val/test split; 5 random seeds; report test accuracy and ROC\-AUC (mean~$\pm$~std). For each seed, we generate ROC/PR curves, calibration plots, threshold sweeps, confusion matrices, score distributions, and length\-effect plots. Outputs are under \texttt{ablation\_study/reports/}.
 
